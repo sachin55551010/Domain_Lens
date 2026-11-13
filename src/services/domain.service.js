@@ -6,19 +6,19 @@ import pLimit from "p-limit";
 const getSubfinderPath = () => process.env.SUBFINDER_PATH || "subfinder";
 const DNS_NO_ADDRESS_CODES = new Set(["ENOTFOUND", "ENODATA", "EAI_NODATA"]);
 const PORTS_TO_CHECK = [80, 443];
-const PORT_TIMEOUT_MS = 2000;
-const SUBFINDER_TIMEOUT_MS = 45_000;
+const PORT_TIMEOUT_MS = 3000;
+const SUBFINDER_TIMEOUT_MS = 60_000;
 const MAX_SUBDOMAINS = 30;
 const MAX_ADDRESSES_PER_HOST = 2;
 const dnsLookupLimit = pLimit(8);
-const portCheckLimit = pLimit(8);
+const portCheckLimit = pLimit(16);
 
 /** Run Subfinder and collect its plain-text, one-host-per-line output. */
 export const discoverSubdomains = (domain) =>
   new Promise((resolve, reject) => {
     const child = spawn(
       getSubfinderPath(),
-      ["-d", domain, "-silent", "-timeout", "10", "-max-time", "1"],
+      ["-d", domain, "-silent", "-timeout", "15", "-max-time", "2"],
       {
         shell: false,
         stdio: ["ignore", "pipe", "ignore"],
@@ -30,6 +30,13 @@ export const discoverSubdomains = (domain) =>
     let timedOut = false;
     let truncated = false;
     let settled = false;
+
+    const settle = (fn) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      fn();
+    };
 
     const addLine = (line) => {
       let hostname = line.trim().toLowerCase().replace(/\.$/, "");
@@ -70,30 +77,32 @@ export const discoverSubdomains = (domain) =>
     });
 
     child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      reject(error);
+      settle(() => reject(error));
     });
 
     child.once("close", (code) => {
+      // Process any remaining buffered output.
       if (outputBuffer.trim()) addLine(outputBuffer);
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
 
-      if (code !== 0 && !timedOut && !truncated) {
-        const error = new Error(`Subfinder exited with code ${code}.`);
-        error.code = "SUBFINDER_FAILED";
-        reject(error);
+      // When we killed the process ourselves (timeout or truncation) the exit
+      // code is null.  Only treat a non-zero exit as an error when *we* did not
+      // initiate the kill.
+      if (code !== 0 && code !== null && !timedOut && !truncated) {
+        settle(() => {
+          const error = new Error(`Subfinder exited with code ${code}.`);
+          error.code = "SUBFINDER_FAILED";
+          reject(error);
+        });
         return;
       }
 
-      resolve({
-        subdomains: [...subdomains],
-        timedOut,
-        truncated,
-      });
+      settle(() =>
+        resolve({
+          subdomains: [...subdomains],
+          timedOut,
+          truncated,
+        }),
+      );
     });
   });
 
@@ -192,7 +201,6 @@ export const analyzeDomain = async (domain) => {
     subdomains,
     discovery: {
       method: "Subfinder passive sources",
-      complete: false,
       found: discovery.subdomains.length,
       truncated: discovery.truncated,
       timedOut: discovery.timedOut,

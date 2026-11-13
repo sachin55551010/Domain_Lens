@@ -60,13 +60,17 @@ export const domainCheck = async (req, res) => {
       discovery: analysis.discovery,
     });
   } catch (error) {
+    const message =
+      error.code === "ENOENT"
+        ? "Subfinder was not found. Make sure it is on PATH or set SUBFINDER_PATH."
+        : error.code === "SUBFINDER_FAILED"
+          ? `Subfinder failed: ${error.message}`
+          : "Domain analysis could not be completed. Please try again.";
+
     return res.status(503).json({
       success: false,
       domain,
-      message:
-        error.code === "ENOENT"
-          ? "Subfinder was not found. Make sure it is on PATH or set SUBFINDER_PATH."
-          : "Subfinder or DNS lookup could not be completed. Please try again.",
+      message,
     });
   }
 };
